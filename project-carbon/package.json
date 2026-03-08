@@ -1,0 +1,16 @@
+{
+  "name": "project-carbon",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CBAM reporting and emissions management platform",
+  "main": "backend/src/server.js",
+  "scripts": {
+    "start": "node backend/src/server.js",
+    "dev": "node backend/src/server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.3"
+  }
+}
