@@ -5,12 +5,15 @@ const { Pool } = require("pg");
 dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const hasDiscreteConfig = Boolean(process.env.DB_HOST && process.env.DB_USER && process.env.DB_NAME);
+const useDatabaseUrl = hasDatabaseUrl && !hasDiscreteConfig;
+
 const sslEnabled =
   process.env.DB_SSL === "true" ||
   process.env.DB_SSL === "1" ||
-  (hasDatabaseUrl && process.env.DATABASE_URL.includes("supabase.co"));
+  (useDatabaseUrl && process.env.DATABASE_URL.includes("supabase.co"));
 
-const poolConfig = hasDatabaseUrl
+const poolConfig = useDatabaseUrl
   ? {
       connectionString: process.env.DATABASE_URL,
       ssl: sslEnabled ? { rejectUnauthorized: false } : undefined

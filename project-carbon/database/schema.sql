@@ -247,3 +247,89 @@ CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id
 CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_logs(created_at);
 
 COMMIT;
+
+-- ---------------------------------------------------------------------------
+-- Auth/session + subscription model (provider-agnostic SaaS billing)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS plans (
+  id BIGSERIAL PRIMARY KEY,
+  code VARCHAR(60) NOT NULL UNIQUE,
+  name VARCHAR(120) NOT NULL,
+  price_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+  price_currency CHAR(3) NOT NULL DEFAULT 'USD',
+  billing_interval VARCHAR(20) NOT NULL DEFAULT 'monthly',
+  features_json JSONB NOT NULL DEFAULT '{}'::JSONB,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id BIGSERIAL PRIMARY KEY,
+  company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  plan_id BIGINT NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
+  status VARCHAR(30) NOT NULL DEFAULT 'active',
+  current_period_start TIMESTAMPTZ NOT NULL,
+  current_period_end TIMESTAMPTZ NOT NULL,
+  cancel_at_period_end BOOLEAN NOT NULL DEFAULT FALSE,
+  external_provider VARCHAR(40),
+  external_subscription_id VARCHAR(200),
+  trial_ends_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT subscription_period_chk CHECK (current_period_end >= current_period_start)
+);
+
+CREATE TABLE IF NOT EXISTS entitlements (
+  id BIGSERIAL PRIMARY KEY,
+  company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  entitlement_key VARCHAR(120) NOT NULL,
+  limit_value NUMERIC(20, 4),
+  used_value NUMERIC(20, 4) NOT NULL DEFAULT 0,
+  period_key VARCHAR(30),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (company_id, entitlement_key, period_key)
+);
+
+CREATE TABLE IF NOT EXISTS usage_events (
+  id BIGSERIAL PRIMARY KEY,
+  company_id BIGINT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  event_type VARCHAR(120) NOT NULL,
+  quantity NUMERIC(20, 4) NOT NULL DEFAULT 1,
+  period_key VARCHAR(30),
+  metadata JSONB NOT NULL DEFAULT '{}'::JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS billing_events (
+  id BIGSERIAL PRIMARY KEY,
+  company_id BIGINT REFERENCES companies(id) ON DELETE CASCADE,
+  subscription_id BIGINT REFERENCES subscriptions(id) ON DELETE SET NULL,
+  provider VARCHAR(40),
+  provider_event_id VARCHAR(200),
+  event_type VARCHAR(120) NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::JSONB,
+  status VARCHAR(30) NOT NULL DEFAULT 'received',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  processed_at TIMESTAMPTZ,
+  UNIQUE (provider, provider_event_id)
+);
+
+CREATE TABLE IF NOT EXISTS magic_login_tokens (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash VARCHAR(255) NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_company_id ON subscriptions(company_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_status ON subscriptions(status);
+CREATE INDEX IF NOT EXISTS idx_entitlements_company_key ON entitlements(company_id, entitlement_key);
+CREATE INDEX IF NOT EXISTS idx_usage_events_company_period ON usage_events(company_id, period_key);
+CREATE INDEX IF NOT EXISTS idx_billing_events_subscription_id ON billing_events(subscription_id);
+CREATE INDEX IF NOT EXISTS idx_magic_login_tokens_user_id ON magic_login_tokens(user_id);

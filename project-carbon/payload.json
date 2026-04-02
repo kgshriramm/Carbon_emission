@@ -1,0 +1,15 @@
+{
+  "companyId": 1,
+  "factoryId": 1,
+  "productId": 1,
+  "reportingPeriodId": 1,
+  "periodDate": "2026-03-01",
+  "productionQuantity": 1000,
+  "productionUnit": "tonne",
+  "userId": 1,
+  "activities": [
+    { "activityType": "electricity_kwh", "quantity": 50000, "unit": "kwh", "geographyCode": "GLOBAL" },
+    { "activityType": "fuel_liters", "quantity": 12000, "unit": "liter", "geographyCode": "GLOBAL" },
+    { "activityType": "transport_tkm", "quantity": 15000, "unit": "tkm", "geographyCode": "GLOBAL" }
+  ]
+}

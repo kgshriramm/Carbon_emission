@@ -2,12 +2,46 @@ const db = require("../config/db");
 
 const DEFAULT_CALCULATION_VERSION = "v1";
 
+function round(value, decimals = 6) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return n;
+  }
+  return Number(n.toFixed(decimals));
+}
+
 function toNumber(value, fieldName) {
   const n = Number(value);
   if (!Number.isFinite(n)) {
     throw new Error(`${fieldName} must be a valid number`);
   }
   return n;
+}
+
+function asPositiveInt(value, fieldName) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  return n;
+}
+
+async function assertCompanyAccess(client, userId, companyId) {
+  const { rows } = await client.query(
+    `
+    SELECT 1
+    FROM company_users
+    WHERE user_id = $1 AND company_id = $2
+    LIMIT 1
+    `,
+    [userId, companyId]
+  );
+
+  if (!rows[0]) {
+    const error = new Error("Forbidden: you do not have access to this company");
+    error.statusCode = 403;
+    throw error;
+  }
 }
 
 function validatePayload(payload) {
@@ -22,21 +56,28 @@ function validatePayload(payload) {
     }
   });
 
-  if (!Array.isArray(payload.activities) || payload.activities.length === 0) {
-    throw new Error("activities must be a non-empty array");
+  if (!payload.userId) {
+    throw new Error("userId is required");
   }
 
-  payload.activities.forEach((activity, index) => {
-    if (!activity.activityType) {
-      throw new Error(`activities[${index}].activityType is required`);
-    }
-    if (activity.quantity === undefined || activity.quantity === null) {
-      throw new Error(`activities[${index}].quantity is required`);
-    }
-    if (!activity.unit) {
-      throw new Error(`activities[${index}].unit is required`);
-    }
-  });
+  const hasInlineActivities = Array.isArray(payload.activities) && payload.activities.length > 0;
+  if (!hasInlineActivities && payload.useStoredActivityData !== true) {
+    throw new Error("Provide activities array or set useStoredActivityData=true");
+  }
+
+  if (hasInlineActivities) {
+    payload.activities.forEach((activity, index) => {
+      if (!activity.activityType) {
+        throw new Error(`activities[${index}].activityType is required`);
+      }
+      if (activity.quantity === undefined || activity.quantity === null) {
+        throw new Error(`activities[${index}].quantity is required`);
+      }
+      if (!activity.unit) {
+        throw new Error(`activities[${index}].unit is required`);
+      }
+    });
+  }
 }
 
 async function resolveFactor(client, { activityType, unit, geographyCode, periodDate }) {
@@ -83,13 +124,13 @@ function computeActivityEmission(activity, factor) {
     : 1;
 
   const factorValue = toNumber(factor.factor_value, "factor_value");
-  const totalCo2eKg = quantity * factorValue * oxidationFactor * conversionFactor;
+  const totalCo2eKg = round(quantity * factorValue * oxidationFactor * conversionFactor, 6);
 
   return {
-    quantity,
+    quantity: round(quantity, 6),
     oxidationFactor,
     conversionFactor,
-    factorValue,
+    factorValue: round(factorValue, 10),
     totalCo2eKg
   };
 }
@@ -112,7 +153,7 @@ async function insertCalculation(client, payload, activity, factor, result) {
 
   const inputSnapshot = {
     activityType: activity.activityType,
-    quantity: activity.quantity,
+    quantity: result.quantity,
     unit: activity.unit,
     geographyCode: activity.geographyCode || "GLOBAL",
     metadata: activity.metadata || {},
@@ -155,7 +196,7 @@ async function insertCalculation(client, payload, activity, factor, result) {
     payload.calculationVersion || DEFAULT_CALCULATION_VERSION,
     JSON.stringify(factorSnapshot),
     JSON.stringify(inputSnapshot),
-    payload.userId || null
+    payload.userId
   ];
 
   const { rows } = await client.query(insertQuery, values);
@@ -163,16 +204,22 @@ async function insertCalculation(client, payload, activity, factor, result) {
 }
 
 function buildSummary(lineItems, productionQuantity) {
-  const totalCo2eKg = lineItems.reduce((sum, item) => sum + item.totalCo2eKg, 0);
-  const directCo2eKg = lineItems
-    .filter((item) => item.activityType !== "electricity_kwh")
-    .reduce((sum, item) => sum + item.totalCo2eKg, 0);
-  const indirectCo2eKg = lineItems
-    .filter((item) => item.activityType === "electricity_kwh")
-    .reduce((sum, item) => sum + item.totalCo2eKg, 0);
+  const totalCo2eKg = round(lineItems.reduce((sum, item) => sum + item.totalCo2eKg, 0), 6);
+  const directCo2eKg = round(
+    lineItems
+      .filter((item) => item.activityType !== "electricity_kwh")
+      .reduce((sum, item) => sum + item.totalCo2eKg, 0),
+    6
+  );
+  const indirectCo2eKg = round(
+    lineItems
+      .filter((item) => item.activityType === "electricity_kwh")
+      .reduce((sum, item) => sum + item.totalCo2eKg, 0),
+    6
+  );
 
   const emissionPerUnit = productionQuantity > 0
-    ? totalCo2eKg / productionQuantity
+    ? round(totalCo2eKg / productionQuantity, 10)
     : null;
 
   return {
@@ -183,6 +230,54 @@ function buildSummary(lineItems, productionQuantity) {
   };
 }
 
+async function getActivitiesForCalculation(client, payload) {
+  const hasInlineActivities = Array.isArray(payload.activities) && payload.activities.length > 0;
+  if (hasInlineActivities) {
+    return payload.activities;
+  }
+
+  const filters = [
+    asPositiveInt(payload.companyId, "companyId"),
+    asPositiveInt(payload.productId, "productId"),
+    asPositiveInt(payload.reportingPeriodId, "reportingPeriodId")
+  ];
+
+  let factoryClause = "";
+  if (payload.factoryId) {
+    filters.push(asPositiveInt(payload.factoryId, "factoryId"));
+    factoryClause = ` AND factory_id = $${filters.length}`;
+  }
+
+  const { rows } = await client.query(
+    `
+      SELECT id, activity_type, quantity, unit, metadata
+      FROM activity_data
+      WHERE company_id = $1
+        AND product_id = $2
+        AND reporting_period_id = $3
+        ${factoryClause}
+      ORDER BY created_at ASC
+    `,
+    filters
+  );
+
+  if (rows.length === 0) {
+    throw new Error("No stored activity_data found for the provided company/product/period");
+  }
+
+  return rows.map((row) => {
+    const metadata = row.metadata || {};
+    return {
+      activityDataId: Number(row.id),
+      activityType: row.activity_type,
+      quantity: toNumber(row.quantity, "quantity"),
+      unit: row.unit,
+      geographyCode: metadata.geographyCode || payload.geographyCode || "GLOBAL",
+      metadata
+    };
+  });
+}
+
 async function calculateAndStoreEmissions(payload) {
   validatePayload(payload);
 
@@ -190,13 +285,18 @@ async function calculateAndStoreEmissions(payload) {
   try {
     await client.query("BEGIN");
 
+    const companyId = asPositiveInt(payload.companyId, "companyId");
+    const userId = asPositiveInt(payload.userId, "userId");
+    await assertCompanyAccess(client, userId, companyId);
+
     const productionQuantity = payload.productionQuantity !== undefined
       ? toNumber(payload.productionQuantity, "productionQuantity")
       : 0;
 
+    const activities = await getActivitiesForCalculation(client, payload);
     const lineItems = [];
 
-    for (const activity of payload.activities) {
+    for (const activity of activities) {
       const factor = await resolveFactor(client, {
         activityType: activity.activityType,
         unit: activity.unit,
@@ -208,12 +308,13 @@ async function calculateAndStoreEmissions(payload) {
       const inserted = await insertCalculation(client, payload, activity, factor, result);
 
       lineItems.push({
-        calculationId: inserted.id,
+        calculationId: Number(inserted.id),
+        activityDataId: activity.activityDataId || null,
         createdAt: inserted.created_at,
         activityType: activity.activityType,
         quantity: result.quantity,
         unit: activity.unit,
-        factorId: factor.id,
+        factorId: Number(factor.id),
         factorVersion: factor.version,
         factorSource: factor.source,
         geographyCode: factor.geography_code,
@@ -226,11 +327,12 @@ async function calculateAndStoreEmissions(payload) {
     await client.query("COMMIT");
 
     return {
-      companyId: payload.companyId,
-      productId: payload.productId,
-      reportingPeriodId: payload.reportingPeriodId,
-      productionQuantity,
+      companyId,
+      productId: Number(payload.productId),
+      reportingPeriodId: Number(payload.reportingPeriodId),
+      productionQuantity: round(productionQuantity, 6),
       productionUnit: payload.productionUnit || null,
+      usedStoredActivityData: !Array.isArray(payload.activities) || payload.activities.length === 0,
       ...summary,
       lineItems
     };
@@ -242,18 +344,84 @@ async function calculateAndStoreEmissions(payload) {
   }
 }
 
-async function getCalculationById(id) {
+async function createActivityData(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("Request body is required");
+  }
+
+  const companyId = asPositiveInt(payload.companyId, "companyId");
+  const productId = asPositiveInt(payload.productId, "productId");
+  const reportingPeriodId = asPositiveInt(payload.reportingPeriodId, "reportingPeriodId");
+  const userId = asPositiveInt(payload.userId, "userId");
+
+  if (!payload.activityType) {
+    throw new Error("activityType is required");
+  }
+  if (payload.quantity === undefined || payload.quantity === null) {
+    throw new Error("quantity is required");
+  }
+  if (!payload.unit) {
+    throw new Error("unit is required");
+  }
+
+  const quantity = toNumber(payload.quantity, "quantity");
+  if (quantity < 0) {
+    throw new Error("quantity must be >= 0");
+  }
+
+  const client = await db.getClient();
+  try {
+    await assertCompanyAccess(client, userId, companyId);
+
+    const metadata = payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+
+    const { rows } = await client.query(
+      `
+      INSERT INTO activity_data (
+        company_id, factory_id, product_id, reporting_period_id,
+        activity_type, quantity, unit, metadata, source_note, created_by
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+      RETURNING id, company_id, factory_id, product_id, reporting_period_id,
+                activity_type, quantity, unit, metadata, source_note, created_by, created_at
+    `,
+      [
+        companyId,
+        payload.factoryId ? asPositiveInt(payload.factoryId, "factoryId") : null,
+        productId,
+        reportingPeriodId,
+        payload.activityType,
+        round(quantity, 6),
+        payload.unit,
+        JSON.stringify(metadata),
+        payload.sourceNote || null,
+        userId
+      ]
+    );
+
+    return rows[0];
+  } finally {
+    client.release();
+  }
+}
+
+async function getCalculationById(id, userId) {
+  const calcId = asPositiveInt(id, "id");
+  const uid = asPositiveInt(userId, "userId");
+
   const { rows } = await db.query(
     `
-      SELECT id, company_id, product_id, reporting_period_id,
-             activity_type, quantity, quantity_unit,
-             factor_value, factor_unit, total_co2e_kg,
-             calculation_method, formula, calculation_version,
-             factor_snapshot, input_snapshot, created_at
-      FROM emission_calculations
-      WHERE id = $1
+      SELECT ec.id, ec.company_id, ec.product_id, ec.reporting_period_id,
+             ec.activity_type, ec.quantity, ec.quantity_unit,
+             ec.factor_value, ec.factor_unit, ec.total_co2e_kg,
+             ec.calculation_method, ec.formula, ec.calculation_version,
+             ec.factor_snapshot, ec.input_snapshot, ec.created_at
+      FROM emission_calculations ec
+      JOIN company_users cu ON cu.company_id = ec.company_id
+      WHERE ec.id = $1 AND cu.user_id = $2
+      LIMIT 1
     `,
-    [id]
+    [calcId, uid]
   );
 
   return rows[0] || null;
@@ -261,5 +429,6 @@ async function getCalculationById(id) {
 
 module.exports = {
   calculateAndStoreEmissions,
+  createActivityData,
   getCalculationById
 };

@@ -1,8 +1,26 @@
 const carbonService = require("../services/carbonService");
 
+async function createActivityData(req, res, next) {
+  try {
+    const activity = await carbonService.createActivityData({
+      ...req.body,
+      userId: req.user.id
+    });
+    return res.status(201).json({
+      success: true,
+      data: activity
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function calculateEmissions(req, res, next) {
   try {
-    const result = await carbonService.calculateAndStoreEmissions(req.body);
+    const result = await carbonService.calculateAndStoreEmissions({
+      ...req.body,
+      userId: req.user.id
+    });
     return res.status(201).json({
       success: true,
       data: result
@@ -22,7 +40,7 @@ async function getEmissionCalculation(req, res, next) {
       });
     }
 
-    const calculation = await carbonService.getCalculationById(id);
+    const calculation = await carbonService.getCalculationById(id, req.user.id);
     if (!calculation) {
       return res.status(404).json({
         success: false,
@@ -40,6 +58,7 @@ async function getEmissionCalculation(req, res, next) {
 }
 
 module.exports = {
+  createActivityData,
   calculateEmissions,
   getEmissionCalculation
 };

@@ -1,0 +1,16 @@
+# Environment
+project-carbon/.env
+project-carbon/frontend/.env.local
+project-carbon/frontend/.env*.local
+
+# Dependencies
+project-carbon/node_modules/
+project-carbon/frontend/node_modules/
+
+# Build output
+project-carbon/frontend/.next/
+project-carbon/frontend/tsconfig.tsbuildinfo
+
+# Logs
+project-carbon/backend_stdout.log
+
