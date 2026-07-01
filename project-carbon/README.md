@@ -23,3 +23,6 @@ Frontend:
 cd frontend
 npm run dev
 ```
+
+this project has to be completed manually before july 30 and hosted 
+
